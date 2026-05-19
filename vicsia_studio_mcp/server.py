@@ -271,6 +271,11 @@ def get_tools() -> list[Tool]:
                                 "output_mode": {
                                     "type": "string",
                                     "enum": ["paste", "capsule"],
+                                    "description": "Mode de sortie (defaut: capsule). paste pour agents texte.",
+                                },
+                                "tts_enabled": {
+                                    "type": "boolean",
+                                    "description": "Lecture vocale en plus de la capsule (defaut: false). Incompatible avec paste.",
                                 },
                                 "voice": {"type": "boolean"},
                                 "selection": {"type": "boolean"},
@@ -774,6 +779,7 @@ async def _create_group(args: dict) -> list[TextContent]:
             "name": agent_def["name"],
             "system_prompt": agent_def.get("system_prompt", ""),
             "output_mode": agent_def.get("output_mode", "capsule"),
+            "tts_enabled": agent_def.get("tts_enabled", False),
             "requires_voice": voice,
             "capture_selection": agent_def.get("selection", False),
             "capture_window": voice,
