@@ -197,8 +197,12 @@ def get_tools() -> list[Tool]:
                     "system_prompt": {"type": "string", "description": "Instructions pour l'agent"},
                     "output_mode": {
                         "type": "string",
-                        "enum": ["paste", "notification", "popup", "vocal", "none"],
-                        "description": "Mode de sortie (defaut: notification)",
+                        "enum": ["paste", "capsule"],
+                        "description": "Mode de sortie (defaut: capsule). paste=colle dans l'app active, capsule=affiche dans la mini-capsule Vicsia.",
+                    },
+                    "tts_enabled": {
+                        "type": "boolean",
+                        "description": "Lecture vocale du resultat en plus de la capsule (defaut: false). Incompatible avec paste.",
                     },
                     "voice": {
                         "type": "boolean",
@@ -266,7 +270,7 @@ def get_tools() -> list[Tool]:
                                 "system_prompt": {"type": "string"},
                                 "output_mode": {
                                     "type": "string",
-                                    "enum": ["paste", "notification", "popup", "vocal", "none"],
+                                    "enum": ["paste", "capsule"],
                                 },
                                 "voice": {"type": "boolean"},
                                 "selection": {"type": "boolean"},
@@ -294,7 +298,11 @@ def get_tools() -> list[Tool]:
                     "hotkey": {"type": "string"},
                     "output_mode": {
                         "type": "string",
-                        "enum": ["notification", "paste", "clipboard", "popup", "vocal", "none"],
+                        "enum": ["paste", "capsule"],
+                    },
+                    "tts_enabled": {
+                        "type": "boolean",
+                        "description": "Lecture vocale du resultat en plus de la capsule (capsule uniquement)",
                     },
                     "enabled": {"type": "boolean"},
                     "requires_voice": {"type": "boolean"},
@@ -688,7 +696,8 @@ async def _create_agent(args: dict) -> list[TextContent]:
     data = {
         "name": args["name"],
         "system_prompt": args.get("system_prompt", ""),
-        "output_mode": args.get("output_mode", "notification"),
+        "output_mode": args.get("output_mode", "capsule"),
+        "tts_enabled": args.get("tts_enabled", False),
         "requires_voice": voice,
         "capture_selection": args.get("selection", False),
         "capture_window": voice,
@@ -722,7 +731,7 @@ async def _create_group(args: dict) -> list[TextContent]:
         "name": args["name"],
         "description": args.get("description", ""),
         "system_prompt": "",
-        "output_mode": "popup",
+        "output_mode": "capsule",
         "is_orchestrator": True,
         "orchestrator_mode": "router",
         "orchestrator_scope": [],
@@ -764,7 +773,7 @@ async def _create_group(args: dict) -> list[TextContent]:
         agent_data = {
             "name": agent_def["name"],
             "system_prompt": agent_def.get("system_prompt", ""),
-            "output_mode": agent_def.get("output_mode", "popup"),
+            "output_mode": agent_def.get("output_mode", "capsule"),
             "requires_voice": voice,
             "capture_selection": agent_def.get("selection", False),
             "capture_window": voice,
@@ -1034,13 +1043,13 @@ voice=false : requires_voice=false, capture_window=false, capture_screenshot=nev
 memory=true : active la memoire persistante de l'agent
 web_search=true : active la recherche web native Mistral
 
-Note : output_mode par defaut dans create_agent est "notification". Specifier explicitement
-"paste" pour les agents texte (dictee, correction, ghostwriter).
+Note : output_mode par defaut = "capsule". Specifier "paste" pour les agents texte (dictee,
+correction, ghostwriter). tts_enabled=true ajoute la lecture vocale (capsule uniquement).
 
 create_group : cree l'orchestrateur et les agents inline en un seul appel.
 - Le MCP est herite automatiquement par les agents enfants
 - orchestrable=true est auto-set sur tous les agents inline (ne pas specifier)
-- output_mode par defaut = "popup" pour l'orchestrateur ET tous les enfants
+- output_mode par defaut = "capsule" pour l'orchestrateur ET tous les enfants
 - Les champs securite (write_mode, blocked_tools, max_writes) se definissent sur le groupe
   et sont propages automatiquement aux enfants
 
@@ -1081,7 +1090,7 @@ Exemple — Correction :
 
 Agents dans un groupe (input = INSTRUCTION) :
 Workflow numerote, "Adapte-toi au connecteur disponible",
-contraintes de securite explicites ("JAMAIS envoyer", "brouillons uniquement"). output_mode="popup".
+contraintes de securite explicites ("JAMAIS envoyer", "brouillons uniquement"). output_mode="capsule".
 
 Exemple — Lecteur Email :
   Tu es un assistant email specialise en LECTURE et SYNTHESE.
@@ -1108,13 +1117,12 @@ Il n'y a PAS de champ "read_only" dans le schema — utiliser write_mode="none" 
 
 ## Output modes
 
-Agents dans un groupe : output_mode="popup" (fenetre flottante, resultat visible et copiable)
 Agents texte standalone (dictee, correction) : output_mode="paste" (insere dans l'app active)
-Confirmation tres courte d'un agent seul : output_mode="notification"
-Action silencieuse sans sortie visible : output_mode="none"
+Tous les autres agents (groupe, question, MCP) : output_mode="capsule" (mini-capsule Vicsia, defaut)
+Lecture vocale optionnelle : tts_enabled=true (s'ajoute a la capsule, pas compatible avec paste)
 
-create_group -> output_mode="popup" par defaut pour tout le groupe.
-create_agent -> output_mode="notification" par defaut. Specifier "paste" pour agents texte.
+create_group -> output_mode="capsule" par defaut pour tout le groupe.
+create_agent -> output_mode="capsule" par defaut. Specifier "paste" pour agents texte.
 
 
 ## Pack de base (eviter les doublons)
