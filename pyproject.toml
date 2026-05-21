@@ -1,6 +1,6 @@
 [project]
 name = "vicsia-studio-mcp"
-version = "1.2.8-beta.16"  # remplacé automatiquement par le workflow CI
+version = "1.2.8-beta.17"  # remplacé automatiquement par le workflow CI
 description = "MCP server for Vicsia Studio — control your voice agents from Claude"
 readme = "README.md"
 requires-python = ">=3.11"
