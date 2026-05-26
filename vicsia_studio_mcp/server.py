@@ -16,15 +16,19 @@ CREATION SIMPLIFIEE:
 - create_group: nom + optionnellement des agents inline. Cree l'orchestrateur + les enfants.
 - install_package: installe un pack complet en un appel.
 
-OUTILS (30):
+OUTILS (28):
 - Agents      : create_agent, create_group, update_agent, delete_agent, list_agents, get_agent
-- Lifecycle   : archive_agent, restore_agent, set_favorite
+- Lifecycle   : archive_agent, restore_agent, get_available_hotkeys
 - Groupes     : list_groups, add_to_group, remove_from_group, install_package, list_packages
 - Connecteurs : list_mcps, get_mcp, toggle_mcp, add_mcp, delete_mcp,
                 browse_mcp_library, install_mcp, get_mcp_config, configure_mcp,
                 start_mcp_auth, poll_mcp_auth
 - Settings    : get_settings, update_settings
-- Introspection: get_vicsia_status, list_profiles, get_last_result
+- Introspection: get_vicsia_status
+
+Pour usage vocal (capacite native Free), seul un sous-set est expose via le
+`tool_sets` "voice" defini cote MCPConfig : create_agent, create_group, list_groups.
+Les autres outils restent disponibles pour les consommateurs externes (Claude Desktop, etc.).
 """
 
 import asyncio
@@ -357,11 +361,6 @@ def get_tools() -> list[Tool]:
             inputSchema={"type": "object", "properties": {"agent_id": {"type": "string"}}, "required": ["agent_id"]},
         ),
         Tool(
-            name="set_favorite",
-            description="Toggle le statut favori d'un agent",
-            inputSchema={"type": "object", "properties": {"agent_id": {"type": "string"}}, "required": ["agent_id"]},
-        ),
-        Tool(
             name="get_available_hotkeys",
             description="Retourne les raccourcis clavier disponibles",
             inputSchema={"type": "object", "properties": {}},
@@ -555,40 +554,6 @@ def get_tools() -> list[Tool]:
             description="Etat actuel de Vicsia (pause, recording, etc.)",
             inputSchema={"type": "object", "properties": {}},
         ),
-        Tool(
-            name="list_profiles",
-            description="Liste les profils vocaux disponibles",
-            inputSchema={"type": "object", "properties": {}},
-        ),
-        Tool(
-            name="get_last_result",
-            description="Dernieres actions Vicsia (input, output, mode, duree, succes)",
-            inputSchema={
-                "type": "object",
-                "properties": {"n": {"type": "integer", "description": "Nombre de resultats (defaut: 1, max: 10)"}},
-            },
-        ),
-        Tool(
-            name="reload_config",
-            description="Force le rechargement des agents et connecteurs. Utile apres des modifications manuelles.",
-            inputSchema={"type": "object", "properties": {}},
-        ),
-        Tool(
-            name="batch_delete",
-            description="Supprime plusieurs agents en un appel. Maximum 20 agents par batch.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "agent_ids": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "maxItems": 20,
-                        "description": "Liste des IDs d'agents a supprimer",
-                    },
-                },
-                "required": ["agent_ids"],
-            },
-        ),
     ]
 
 
@@ -611,7 +576,6 @@ async def handle_tool(name: str, arguments: dict) -> list[TextContent]:
         # Lifecycle
         "archive_agent": lambda: _api_post(f"/api/agents/{arguments['agent_id']}/archive"),
         "restore_agent": lambda: _api_post(f"/api/agents/{arguments['agent_id']}/restore"),
-        "set_favorite": lambda: _api_post(f"/api/agents/{arguments['agent_id']}/favorite"),
         "get_available_hotkeys": lambda: _api_get("/api/agents/hotkeys"),
         # Groupes
         "list_groups": lambda: _list_groups(),
@@ -636,10 +600,6 @@ async def handle_tool(name: str, arguments: dict) -> list[TextContent]:
         "update_settings": lambda: _api_put("/api/settings", arguments),
         # Introspection
         "get_vicsia_status": lambda: _api_get("/api/status"),
-        "list_profiles": lambda: _api_get("/api/profiles"),
-        "get_last_result": lambda: _get_last_result(arguments.get("n", 1)),
-        "reload_config": lambda: _reload_config(),
-        "batch_delete": lambda: _batch_delete(arguments["agent_ids"]),
     }
 
     handler = handlers.get(name)
@@ -956,60 +916,6 @@ async def _add_mcp(args: dict) -> list[TextContent]:
         "description": args.get("description", ""),
     }
     return _json_result(await _call_api("POST", "/api/mcps/custom", data))
-
-
-# ============================================================================
-# Introspection
-# ============================================================================
-
-
-async def _get_last_result(n: int = 1) -> list[TextContent]:
-    n = max(1, min(n, 10))
-    result = await _call_api("GET", "/api/history")
-    if isinstance(result, list) and len(result) > 0:
-        return _json_result(result[:n])
-    return _json_result({"message": "Aucune action recente dans l'historique."})
-
-
-async def _reload_config() -> list[TextContent]:
-    """Force le rechargement des agents et connecteurs."""
-    import time
-
-    signal_path = Path(__file__).parent.parent / "data" / ".mcp_refresh_signal"
-    try:
-        signal_path.parent.mkdir(parents=True, exist_ok=True)
-        signal_path.write_text(str(time.time()))
-    except Exception:
-        pass
-
-    result = await _call_api("GET", "/api/agents")
-    count = len(result) if isinstance(result, list) else 0
-    return _json_result({"ok": True, "message": f"Config rechargee. {count} agents trouves."})
-
-
-async def _batch_delete(agent_ids: list[str]) -> list[TextContent]:
-    """Supprime plusieurs agents en un appel."""
-    if len(agent_ids) > 20:
-        return _json_result({"ok": False, "error": "Maximum 20 agents par batch"})
-
-    deleted = []
-    failed = []
-    for agent_id in agent_ids:
-        result = await _call_api("DELETE", f"/api/agents/{agent_id}")
-        if isinstance(result, dict) and result.get("ok"):
-            deleted.append(agent_id)
-        else:
-            error = result.get("error", "Unknown") if isinstance(result, dict) else "Unknown"
-            failed.append({"id": agent_id, "error": error})
-
-    return _json_result(
-        {
-            "ok": len(failed) == 0,
-            "deleted": deleted,
-            "failed": failed,
-            "message": f"{len(deleted)} supprimes, {len(failed)} echecs",
-        }
-    )
 
 
 # ============================================================================
