@@ -145,9 +145,17 @@ async def _call_api(method: str, path: str, data: dict | None = None) -> dict:
         return {"ok": False, "error": f"Erreur API: {str(e)}"}
 
 
-def _json_result(result) -> list[TextContent]:
-    """Encode le resultat en JSON pour le retour MCP."""
-    return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+def _json_result(result, compact: bool = False) -> list[TextContent]:
+    """Encode le resultat en JSON pour le retour MCP.
+
+    compact=True : pas d'indent — economise des tokens pour les listes longues
+    (list_agents en mode summary par ex.). Defaut : indent=2 pour lisibilite.
+    """
+    if compact:
+        text = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+    else:
+        text = json.dumps(result, ensure_ascii=False, indent=2)
+    return [TextContent(type="text", text=text)]
 
 
 # ============================================================================
@@ -162,16 +170,17 @@ def get_tools() -> list[Tool]:
         Tool(
             name="list_agents",
             description=(
-                "Liste tous les agents Vicsia. Les groupes sont des agents avec is_orchestrator=true, "
-                "orchestrator_scope contient les IDs des agents enfants."
+                "Liste tous les agents Vicsia en format compact par defaut (id, name, hotkey, "
+                "is_group, parent_group, members pour les groupes). Utile pour eviter les doublons "
+                "avant create_agent. Passez full=true pour avoir les details complets."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "include_archived": {"type": "boolean", "description": "Inclure les archives (defaut: true)"},
-                    "summary": {
+                    "include_archived": {"type": "boolean", "description": "Inclure les archives (defaut: false)"},
+                    "full": {
                         "type": "boolean",
-                        "description": "Vue compacte: id, name, hotkey, enabled, archived, is_orchestrator (defaut: false)",
+                        "description": "Retourne tous les champs (system_prompt, description, mcps, etc.) au lieu du format compact. Defaut: false.",
                     },
                 },
             },
@@ -567,7 +576,7 @@ async def handle_tool(name: str, arguments: dict) -> list[TextContent]:
 
     handlers = {
         # Agents
-        "list_agents": lambda: _list_agents(arguments.get("include_archived", True), arguments.get("summary", False)),
+        "list_agents": lambda: _list_agents(arguments.get("include_archived", False), arguments.get("full", False)),
         "get_agent": lambda: _get_agent(arguments["agent_id"]),
         "create_agent": lambda: _create_agent(arguments),
         "create_group": lambda: _create_group(arguments),
@@ -634,22 +643,56 @@ async def _api_delete(path: str) -> list[TextContent]:
 # ============================================================================
 
 
-async def _list_agents(include_archived: bool = True, summary: bool = False) -> list[TextContent]:
+async def _list_agents(include_archived: bool = False, full: bool = False) -> list[TextContent]:
+    """Liste les agents — format COMPACT par defaut pour economiser des tokens.
+
+    Format compact (defaut) : id, name, hotkey, is_group (true si orchestrateur),
+    parent_group (nom du groupe parent ou null), members (liste des noms si is_group).
+    Format full=true : tous les champs (system_prompt, mcps, description...).
+    """
     param = "true" if include_archived else "false"
     result = await _call_api("GET", f"/api/agents?include_archived={param}")
-    # API returns bare list — normalize; propagate errors
     if isinstance(result, list):
         agents = result
     elif isinstance(result, dict) and "error" in result:
         return _json_result(result)
     else:
         agents = result.get("agents", [])
-    if summary:
-        agents = [
-            {k: a[k] for k in ("id", "name", "enabled", "archived", "is_orchestrator", "favorite", "hotkey") if k in a}
-            for a in agents
-        ]
-    return _json_result({"ok": True, "agents": agents, "count": len(agents)})
+
+    if full:
+        return _json_result({"ok": True, "agents": agents, "count": len(agents)})
+
+    # Format compact : id + name + hotkey + structure groupe
+    # Etape 1 : map id -> name pour resoudre les scopes
+    id_to_name = {a.get("id"): a.get("name", "?") for a in agents}
+    # Etape 2 : pour chaque agent, calculer parent_group via les orchestrator_scope
+    parent_of: dict[str, str] = {}
+    for a in agents:
+        if a.get("is_orchestrator"):
+            for child_id in a.get("orchestrator_scope", []) or []:
+                if child_id in id_to_name:
+                    parent_of[child_id] = a.get("name", "?")
+
+    compact = []
+    for a in agents:
+        item: dict = {
+            "id": a.get("id"),
+            "name": a.get("name"),
+        }
+        if a.get("hotkey"):
+            item["hotkey"] = a["hotkey"]
+        if a.get("is_orchestrator"):
+            item["is_group"] = True
+            members = [id_to_name.get(cid) for cid in (a.get("orchestrator_scope") or []) if cid in id_to_name]
+            if members:
+                item["members"] = members
+        elif a.get("id") in parent_of:
+            item["parent_group"] = parent_of[a["id"]]
+        if a.get("archived"):
+            item["archived"] = True
+        compact.append(item)
+
+    return _json_result({"ok": True, "agents": compact, "count": len(compact)}, compact=True)
 
 
 async def _get_agent(agent_id: str) -> list[TextContent]:
@@ -975,7 +1018,7 @@ create_group : cree l'orchestrateur et les agents inline en un seul appel.
 5. Pour OAuth Microsoft : polling poll_mcp_auth toutes les 5s, max 36 iterations (3 min).
 6. Pour OAuth Google : pas de polling. L'auth se fait automatiquement au premier appel d'agent.
 7. Toujours remplir descriptions (agents et groupes) — elles sont la base du routage vocal.
-8. Toujours verifier list_agents(summary=true) avant de creer — eviter les doublons.
+8. Toujours verifier list_agents() avant de creer — eviter les doublons.
 
 
 ## Routage vocal — descriptions
@@ -1048,7 +1091,7 @@ Au premier lancement, Vicsia installe automatiquement un pack de base :
   et Recherche Web (web_search_enabled=true)
 
 Connecteurs actifs par defaut : memory, filesystem.
-Toujours verifier list_agents(summary=true) avant de creer — ne pas dupliquer ces agents.
+Toujours verifier list_agents() avant de creer — ne pas dupliquer ces agents.
 
 
 ## Roles
