@@ -16,19 +16,15 @@ CREATION SIMPLIFIEE:
 - create_group: nom + optionnellement des agents inline. Cree l'orchestrateur + les enfants.
 - install_package: installe un pack complet en un appel.
 
-OUTILS (28):
+OUTILS (30):
 - Agents      : create_agent, create_group, update_agent, delete_agent, list_agents, get_agent
-- Lifecycle   : archive_agent, restore_agent, get_available_hotkeys
+- Lifecycle   : archive_agent, restore_agent, set_favorite
 - Groupes     : list_groups, add_to_group, remove_from_group, install_package, list_packages
 - Connecteurs : list_mcps, get_mcp, toggle_mcp, add_mcp, delete_mcp,
                 browse_mcp_library, install_mcp, get_mcp_config, configure_mcp,
                 start_mcp_auth, poll_mcp_auth
 - Settings    : get_settings, update_settings
-- Introspection: get_vicsia_status
-
-Pour usage vocal (capacite native Free), seul un sous-set est expose via le
-`tool_sets` "voice" defini cote MCPConfig : create_agent, create_group, list_groups.
-Les autres outils restent disponibles pour les consommateurs externes (Claude Desktop, etc.).
+- Introspection: get_vicsia_status, list_profiles, get_last_result
 """
 
 import asyncio
@@ -145,17 +141,9 @@ async def _call_api(method: str, path: str, data: dict | None = None) -> dict:
         return {"ok": False, "error": f"Erreur API: {str(e)}"}
 
 
-def _json_result(result, compact: bool = False) -> list[TextContent]:
-    """Encode le resultat en JSON pour le retour MCP.
-
-    compact=True : pas d'indent — economise des tokens pour les listes longues
-    (list_agents en mode summary par ex.). Defaut : indent=2 pour lisibilite.
-    """
-    if compact:
-        text = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
-    else:
-        text = json.dumps(result, ensure_ascii=False, indent=2)
-    return [TextContent(type="text", text=text)]
+def _json_result(result) -> list[TextContent]:
+    """Encode le resultat en JSON pour le retour MCP."""
+    return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
 
 # ============================================================================
@@ -170,17 +158,16 @@ def get_tools() -> list[Tool]:
         Tool(
             name="list_agents",
             description=(
-                "Liste tous les agents Vicsia en format compact par defaut (id, name, hotkey, "
-                "is_group, parent_group, members pour les groupes). Utile pour eviter les doublons "
-                "avant create_agent. Passez full=true pour avoir les details complets."
+                "Liste tous les agents Vicsia. Les groupes sont des agents avec is_orchestrator=true, "
+                "orchestrator_scope contient les IDs des agents enfants."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "include_archived": {"type": "boolean", "description": "Inclure les archives (defaut: false)"},
-                    "full": {
+                    "include_archived": {"type": "boolean", "description": "Inclure les archives (defaut: true)"},
+                    "summary": {
                         "type": "boolean",
-                        "description": "Retourne tous les champs (system_prompt, description, mcps, etc.) au lieu du format compact. Defaut: false.",
+                        "description": "Vue compacte: id, name, hotkey, enabled, archived, is_orchestrator (defaut: false)",
                     },
                 },
             },
@@ -210,12 +197,8 @@ def get_tools() -> list[Tool]:
                     "system_prompt": {"type": "string", "description": "Instructions pour l'agent"},
                     "output_mode": {
                         "type": "string",
-                        "enum": ["paste", "capsule"],
-                        "description": "Mode de sortie (defaut: capsule). paste=colle dans l'app active, capsule=affiche dans la mini-capsule Vicsia.",
-                    },
-                    "tts_enabled": {
-                        "type": "boolean",
-                        "description": "Lecture vocale du resultat en plus de la capsule (defaut: false). Incompatible avec paste.",
+                        "enum": ["paste", "notification", "popup", "vocal", "none"],
+                        "description": "Mode de sortie (defaut: notification)",
                     },
                     "voice": {
                         "type": "boolean",
@@ -283,12 +266,7 @@ def get_tools() -> list[Tool]:
                                 "system_prompt": {"type": "string"},
                                 "output_mode": {
                                     "type": "string",
-                                    "enum": ["paste", "capsule"],
-                                    "description": "Mode de sortie (defaut: capsule). paste pour agents texte.",
-                                },
-                                "tts_enabled": {
-                                    "type": "boolean",
-                                    "description": "Lecture vocale en plus de la capsule (defaut: false). Incompatible avec paste.",
+                                    "enum": ["paste", "notification", "popup", "vocal", "none"],
                                 },
                                 "voice": {"type": "boolean"},
                                 "selection": {"type": "boolean"},
@@ -316,11 +294,7 @@ def get_tools() -> list[Tool]:
                     "hotkey": {"type": "string"},
                     "output_mode": {
                         "type": "string",
-                        "enum": ["paste", "capsule"],
-                    },
-                    "tts_enabled": {
-                        "type": "boolean",
-                        "description": "Lecture vocale du resultat en plus de la capsule (capsule uniquement)",
+                        "enum": ["notification", "paste", "clipboard", "popup", "vocal", "none"],
                     },
                     "enabled": {"type": "boolean"},
                     "requires_voice": {"type": "boolean"},
@@ -367,6 +341,11 @@ def get_tools() -> list[Tool]:
         Tool(
             name="restore_agent",
             description="Restaure un agent archive (reactive le raccourci)",
+            inputSchema={"type": "object", "properties": {"agent_id": {"type": "string"}}, "required": ["agent_id"]},
+        ),
+        Tool(
+            name="set_favorite",
+            description="Toggle le statut favori d'un agent",
             inputSchema={"type": "object", "properties": {"agent_id": {"type": "string"}}, "required": ["agent_id"]},
         ),
         Tool(
@@ -563,6 +542,40 @@ def get_tools() -> list[Tool]:
             description="Etat actuel de Vicsia (pause, recording, etc.)",
             inputSchema={"type": "object", "properties": {}},
         ),
+        Tool(
+            name="list_profiles",
+            description="Liste les profils vocaux disponibles",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="get_last_result",
+            description="Dernieres actions Vicsia (input, output, mode, duree, succes)",
+            inputSchema={
+                "type": "object",
+                "properties": {"n": {"type": "integer", "description": "Nombre de resultats (defaut: 1, max: 10)"}},
+            },
+        ),
+        Tool(
+            name="reload_config",
+            description="Force le rechargement des agents et connecteurs. Utile apres des modifications manuelles.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="batch_delete",
+            description="Supprime plusieurs agents en un appel. Maximum 20 agents par batch.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "agent_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": 20,
+                        "description": "Liste des IDs d'agents a supprimer",
+                    },
+                },
+                "required": ["agent_ids"],
+            },
+        ),
     ]
 
 
@@ -576,7 +589,7 @@ async def handle_tool(name: str, arguments: dict) -> list[TextContent]:
 
     handlers = {
         # Agents
-        "list_agents": lambda: _list_agents(arguments.get("include_archived", False), arguments.get("full", False)),
+        "list_agents": lambda: _list_agents(arguments.get("include_archived", True), arguments.get("summary", False)),
         "get_agent": lambda: _get_agent(arguments["agent_id"]),
         "create_agent": lambda: _create_agent(arguments),
         "create_group": lambda: _create_group(arguments),
@@ -585,6 +598,7 @@ async def handle_tool(name: str, arguments: dict) -> list[TextContent]:
         # Lifecycle
         "archive_agent": lambda: _api_post(f"/api/agents/{arguments['agent_id']}/archive"),
         "restore_agent": lambda: _api_post(f"/api/agents/{arguments['agent_id']}/restore"),
+        "set_favorite": lambda: _api_post(f"/api/agents/{arguments['agent_id']}/favorite"),
         "get_available_hotkeys": lambda: _api_get("/api/agents/hotkeys"),
         # Groupes
         "list_groups": lambda: _list_groups(),
@@ -609,6 +623,10 @@ async def handle_tool(name: str, arguments: dict) -> list[TextContent]:
         "update_settings": lambda: _api_put("/api/settings", arguments),
         # Introspection
         "get_vicsia_status": lambda: _api_get("/api/status"),
+        "list_profiles": lambda: _api_get("/api/profiles"),
+        "get_last_result": lambda: _get_last_result(arguments.get("n", 1)),
+        "reload_config": lambda: _reload_config(),
+        "batch_delete": lambda: _batch_delete(arguments["agent_ids"]),
     }
 
     handler = handlers.get(name)
@@ -643,56 +661,22 @@ async def _api_delete(path: str) -> list[TextContent]:
 # ============================================================================
 
 
-async def _list_agents(include_archived: bool = False, full: bool = False) -> list[TextContent]:
-    """Liste les agents — format COMPACT par defaut pour economiser des tokens.
-
-    Format compact (defaut) : id, name, hotkey, is_group (true si orchestrateur),
-    parent_group (nom du groupe parent ou null), members (liste des noms si is_group).
-    Format full=true : tous les champs (system_prompt, mcps, description...).
-    """
+async def _list_agents(include_archived: bool = True, summary: bool = False) -> list[TextContent]:
     param = "true" if include_archived else "false"
     result = await _call_api("GET", f"/api/agents?include_archived={param}")
+    # API returns bare list — normalize; propagate errors
     if isinstance(result, list):
         agents = result
     elif isinstance(result, dict) and "error" in result:
         return _json_result(result)
     else:
         agents = result.get("agents", [])
-
-    if full:
-        return _json_result({"ok": True, "agents": agents, "count": len(agents)})
-
-    # Format compact : id + name + hotkey + structure groupe
-    # Etape 1 : map id -> name pour resoudre les scopes
-    id_to_name = {a.get("id"): a.get("name", "?") for a in agents}
-    # Etape 2 : pour chaque agent, calculer parent_group via les orchestrator_scope
-    parent_of: dict[str, str] = {}
-    for a in agents:
-        if a.get("is_orchestrator"):
-            for child_id in a.get("orchestrator_scope", []) or []:
-                if child_id in id_to_name:
-                    parent_of[child_id] = a.get("name", "?")
-
-    compact = []
-    for a in agents:
-        item: dict = {
-            "id": a.get("id"),
-            "name": a.get("name"),
-        }
-        if a.get("hotkey"):
-            item["hotkey"] = a["hotkey"]
-        if a.get("is_orchestrator"):
-            item["is_group"] = True
-            members = [id_to_name.get(cid) for cid in (a.get("orchestrator_scope") or []) if cid in id_to_name]
-            if members:
-                item["members"] = members
-        elif a.get("id") in parent_of:
-            item["parent_group"] = parent_of[a["id"]]
-        if a.get("archived"):
-            item["archived"] = True
-        compact.append(item)
-
-    return _json_result({"ok": True, "agents": compact, "count": len(compact)}, compact=True)
+    if summary:
+        agents = [
+            {k: a[k] for k in ("id", "name", "enabled", "archived", "is_orchestrator", "favorite", "hotkey") if k in a}
+            for a in agents
+        ]
+    return _json_result({"ok": True, "agents": agents, "count": len(agents)})
 
 
 async def _get_agent(agent_id: str) -> list[TextContent]:
@@ -704,8 +688,7 @@ async def _create_agent(args: dict) -> list[TextContent]:
     data = {
         "name": args["name"],
         "system_prompt": args.get("system_prompt", ""),
-        "output_mode": args.get("output_mode", "capsule"),
-        "tts_enabled": args.get("tts_enabled", False),
+        "output_mode": args.get("output_mode", "notification"),
         "requires_voice": voice,
         "capture_selection": args.get("selection", False),
         "capture_window": voice,
@@ -739,7 +722,7 @@ async def _create_group(args: dict) -> list[TextContent]:
         "name": args["name"],
         "description": args.get("description", ""),
         "system_prompt": "",
-        "output_mode": "capsule",
+        "output_mode": "popup",
         "is_orchestrator": True,
         "orchestrator_mode": "router",
         "orchestrator_scope": [],
@@ -781,8 +764,7 @@ async def _create_group(args: dict) -> list[TextContent]:
         agent_data = {
             "name": agent_def["name"],
             "system_prompt": agent_def.get("system_prompt", ""),
-            "output_mode": agent_def.get("output_mode", "capsule"),
-            "tts_enabled": agent_def.get("tts_enabled", False),
+            "output_mode": agent_def.get("output_mode", "popup"),
             "requires_voice": voice,
             "capture_selection": agent_def.get("selection", False),
             "capture_window": voice,
@@ -962,6 +944,60 @@ async def _add_mcp(args: dict) -> list[TextContent]:
 
 
 # ============================================================================
+# Introspection
+# ============================================================================
+
+
+async def _get_last_result(n: int = 1) -> list[TextContent]:
+    n = max(1, min(n, 10))
+    result = await _call_api("GET", "/api/history")
+    if isinstance(result, list) and len(result) > 0:
+        return _json_result(result[:n])
+    return _json_result({"message": "Aucune action recente dans l'historique."})
+
+
+async def _reload_config() -> list[TextContent]:
+    """Force le rechargement des agents et connecteurs."""
+    import time
+
+    signal_path = Path(__file__).parent.parent / "data" / ".mcp_refresh_signal"
+    try:
+        signal_path.parent.mkdir(parents=True, exist_ok=True)
+        signal_path.write_text(str(time.time()))
+    except Exception:
+        pass
+
+    result = await _call_api("GET", "/api/agents")
+    count = len(result) if isinstance(result, list) else 0
+    return _json_result({"ok": True, "message": f"Config rechargee. {count} agents trouves."})
+
+
+async def _batch_delete(agent_ids: list[str]) -> list[TextContent]:
+    """Supprime plusieurs agents en un appel."""
+    if len(agent_ids) > 20:
+        return _json_result({"ok": False, "error": "Maximum 20 agents par batch"})
+
+    deleted = []
+    failed = []
+    for agent_id in agent_ids:
+        result = await _call_api("DELETE", f"/api/agents/{agent_id}")
+        if isinstance(result, dict) and result.get("ok"):
+            deleted.append(agent_id)
+        else:
+            error = result.get("error", "Unknown") if isinstance(result, dict) else "Unknown"
+            failed.append({"id": agent_id, "error": error})
+
+    return _json_result(
+        {
+            "ok": len(failed) == 0,
+            "deleted": deleted,
+            "failed": failed,
+            "message": f"{len(deleted)} supprimes, {len(failed)} echecs",
+        }
+    )
+
+
+# ============================================================================
 # Server Instructions (injectees dans chaque conversation MCP)
 # ============================================================================
 
@@ -998,13 +1034,13 @@ voice=false : requires_voice=false, capture_window=false, capture_screenshot=nev
 memory=true : active la memoire persistante de l'agent
 web_search=true : active la recherche web native Mistral
 
-Note : output_mode par defaut = "capsule". Specifier "paste" pour les agents texte (dictee,
-correction, ghostwriter). tts_enabled=true ajoute la lecture vocale (capsule uniquement).
+Note : output_mode par defaut dans create_agent est "notification". Specifier explicitement
+"paste" pour les agents texte (dictee, correction, ghostwriter).
 
 create_group : cree l'orchestrateur et les agents inline en un seul appel.
 - Le MCP est herite automatiquement par les agents enfants
 - orchestrable=true est auto-set sur tous les agents inline (ne pas specifier)
-- output_mode par defaut = "capsule" pour l'orchestrateur ET tous les enfants
+- output_mode par defaut = "popup" pour l'orchestrateur ET tous les enfants
 - Les champs securite (write_mode, blocked_tools, max_writes) se definissent sur le groupe
   et sont propages automatiquement aux enfants
 
@@ -1018,7 +1054,7 @@ create_group : cree l'orchestrateur et les agents inline en un seul appel.
 5. Pour OAuth Microsoft : polling poll_mcp_auth toutes les 5s, max 36 iterations (3 min).
 6. Pour OAuth Google : pas de polling. L'auth se fait automatiquement au premier appel d'agent.
 7. Toujours remplir descriptions (agents et groupes) — elles sont la base du routage vocal.
-8. Toujours verifier list_agents() avant de creer — eviter les doublons.
+8. Toujours verifier list_agents(summary=true) avant de creer — eviter les doublons.
 
 
 ## Routage vocal — descriptions
@@ -1045,7 +1081,7 @@ Exemple — Correction :
 
 Agents dans un groupe (input = INSTRUCTION) :
 Workflow numerote, "Adapte-toi au connecteur disponible",
-contraintes de securite explicites ("JAMAIS envoyer", "brouillons uniquement"). output_mode="capsule".
+contraintes de securite explicites ("JAMAIS envoyer", "brouillons uniquement"). output_mode="popup".
 
 Exemple — Lecteur Email :
   Tu es un assistant email specialise en LECTURE et SYNTHESE.
@@ -1072,12 +1108,13 @@ Il n'y a PAS de champ "read_only" dans le schema — utiliser write_mode="none" 
 
 ## Output modes
 
+Agents dans un groupe : output_mode="popup" (fenetre flottante, resultat visible et copiable)
 Agents texte standalone (dictee, correction) : output_mode="paste" (insere dans l'app active)
-Tous les autres agents (groupe, question, MCP) : output_mode="capsule" (mini-capsule Vicsia, defaut)
-Lecture vocale optionnelle : tts_enabled=true (s'ajoute a la capsule, pas compatible avec paste)
+Confirmation tres courte d'un agent seul : output_mode="notification"
+Action silencieuse sans sortie visible : output_mode="none"
 
-create_group -> output_mode="capsule" par defaut pour tout le groupe.
-create_agent -> output_mode="capsule" par defaut. Specifier "paste" pour agents texte.
+create_group -> output_mode="popup" par defaut pour tout le groupe.
+create_agent -> output_mode="notification" par defaut. Specifier "paste" pour agents texte.
 
 
 ## Pack de base (eviter les doublons)
@@ -1091,7 +1128,7 @@ Au premier lancement, Vicsia installe automatiquement un pack de base :
   et Recherche Web (web_search_enabled=true)
 
 Connecteurs actifs par defaut : memory, filesystem.
-Toujours verifier list_agents() avant de creer — ne pas dupliquer ces agents.
+Toujours verifier list_agents(summary=true) avant de creer — ne pas dupliquer ces agents.
 
 
 ## Roles
