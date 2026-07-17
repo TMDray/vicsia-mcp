@@ -14,12 +14,11 @@ CONCEPTS:
 CREATION SIMPLIFIEE:
 - create_agent: seul le nom est requis. voice=true (vocal) ou false (action sur selection).
 - create_group: nom + optionnellement des agents inline. Cree l'orchestrateur + les enfants.
-- install_package: installe un pack complet en un appel.
 
-OUTILS (28):
+OUTILS (27):
 - Agents      : create_agent, create_group, update_agent, delete_agent, list_agents, get_agent
 - Lifecycle   : archive_agent, restore_agent, get_available_hotkeys
-- Groupes     : list_groups, add_to_group, remove_from_group, install_package, list_packages
+- Groupes     : list_groups, add_to_group, remove_from_group, list_packages
 - Connecteurs : list_mcps, get_mcp, toggle_mcp, add_mcp, delete_mcp,
                 browse_mcp_library, install_mcp, get_mcp_config, configure_mcp,
                 start_mcp_auth, poll_mcp_auth
@@ -345,6 +344,10 @@ def get_tools() -> list[Tool]:
                     },
                     "mcp_permissions": {"type": "object"},
                     "category": {"type": "string"},
+                    "confirm_detach": {
+                        "type": "boolean",
+                        "description": "Confirme la personnalisation du prompt d'un agent bibliotheque lie (detache l'agent des mises a jour automatiques). Requis uniquement si le premier appel renvoie une erreur de detachement.",
+                    },
                 },
                 "required": ["agent_id"],
             },
@@ -408,15 +411,6 @@ def get_tools() -> list[Tool]:
             name="list_packages",
             description="Liste les packs d'agents pre-configures disponibles (base, mail, etc.)",
             inputSchema={"type": "object", "properties": {}},
-        ),
-        Tool(
-            name="install_package",
-            description="Installe un pack complet d'agents + orchestrateur. Ex: 'base' (7 agents), 'mail' (3 agents email + orchestrateur).",
-            inputSchema={
-                "type": "object",
-                "properties": {"package_id": {"type": "string", "description": "ID du pack (ex: base, mail)"}},
-                "required": ["package_id"],
-            },
         ),
         # === Connecteurs (MCPs) ===
         Tool(
@@ -591,7 +585,6 @@ async def handle_tool(name: str, arguments: dict) -> list[TextContent]:
         "add_to_group": lambda: _add_to_group(arguments["group_id"], arguments["agent_id"]),
         "remove_from_group": lambda: _remove_from_group(arguments["group_id"], arguments["agent_id"]),
         "list_packages": lambda: _api_get("/api/agents/library"),
-        "install_package": lambda: _api_post(f"/api/agents/install-package/{arguments['package_id']}"),
         # Connecteurs
         "list_mcps": lambda: _list_mcps(),
         "get_mcp": lambda: _api_get(f"/api/mcps/{arguments['mcp_id']}"),
@@ -826,7 +819,16 @@ async def _create_group(args: dict) -> list[TextContent]:
 async def _update_agent(args: dict) -> list[TextContent]:
     agent_id = args.get("agent_id")
     data = {k: v for k, v in args.items() if k != "agent_id"}
-    return _json_result(await _call_api("PUT", f"/api/agents/{agent_id}", data))
+    result = await _call_api("PUT", f"/api/agents/{agent_id}", data)
+    if isinstance(result, dict) and not result.get("ok") and result.get("detach_required"):
+        result = {
+            **result,
+            "error": (
+                "Cet agent est lie a la bibliotheque. Repasse l'appel avec confirm_detach=true "
+                "pour le personnaliser (il sera detache des mises a jour automatiques)."
+            ),
+        }
+    return _json_result(result)
 
 
 async def _delete_agent(agent_id: str) -> list[TextContent]:
