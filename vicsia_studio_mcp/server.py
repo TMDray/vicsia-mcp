@@ -15,15 +15,27 @@ CREATION SIMPLIFIEE:
 - create_agent: seul le nom est requis. voice=true (vocal) ou false (action sur selection).
 - create_group: nom + optionnellement des agents inline. Cree l'orchestrateur + les enfants.
 
-OUTILS (27):
+OUTILS (50):
 - Agents      : create_agent, create_group, update_agent, delete_agent, list_agents, get_agent
 - Lifecycle   : archive_agent, restore_agent, get_available_hotkeys
 - Groupes     : list_groups, add_to_group, remove_from_group, list_packages
 - Connecteurs : list_mcps, get_mcp, toggle_mcp, add_mcp, delete_mcp,
                 browse_mcp_library, install_mcp, get_mcp_config, configure_mcp,
                 start_mcp_auth, poll_mcp_auth
+- MCP tools   : list_mcp_tools, test_mcp, get_mcp_suggested_agents, reinstall_mcp
+- Projets     : list_projects, create_project, get_project, update_project, delete_project
+- Scripts     : upload_script, validate_script, list_connector_scripts,
+                list_project_secrets, set_project_secret, delete_project_secret
+- Automations : list_automations, create_automation, get_automation, update_automation,
+                delete_automation, run_automation_now, get_automation_runs,
+                get_automation_webhook_url
 - Settings    : get_settings, update_settings
 - Introspection: get_vicsia_status
+
+Projets (Chat IA / mini-app) : un Projet porte un prompt + connecteurs MCP + un script Python
+(secrets PEP 723). Il peut etre expose comme connecteur (available_as_connector) puis branche
+sur un agent/groupe via update_agent(script_connectors=[project_id]) ou create_group(script_connectors).
+Automations : declencheurs (interval/daily/webhook) qui lancent un Projet en tache de fond.
 
 Pour usage vocal (capacite native Free), seul un sous-set est expose via le
 `tool_sets` "voice" defini cote MCPConfig : create_agent, create_group, list_groups.
@@ -272,6 +284,14 @@ def get_tools() -> list[Tool]:
                         "maximum": 6,
                         "description": "Nombre max d'ecritures par session (defaut: 1). Propage aux agents enfants.",
                     },
+                    "script_connectors": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "IDs de Projets (available_as_connector=true) branches comme connecteurs-script "
+                            "sur l'orchestrateur du groupe. Lister via list_connector_scripts."
+                        ),
+                    },
                     "agents": {
                         "type": "array",
                         "description": "Agents a creer dans le groupe",
@@ -347,6 +367,15 @@ def get_tools() -> list[Tool]:
                     "confirm_detach": {
                         "type": "boolean",
                         "description": "Confirme la personnalisation du prompt d'un agent bibliotheque lie (detache l'agent des mises a jour automatiques). Requis uniquement si le premier appel renvoie une erreur de detachement.",
+                    },
+                    "script_connectors": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "IDs de Projets (available_as_connector=true) branches comme connecteurs-script "
+                            "sur cet agent/groupe. L'agent peut alors appeler le script comme un outil. "
+                            "Lister les projets disponibles via list_connector_scripts."
+                        ),
                     },
                 },
                 "required": ["agent_id"],
@@ -514,14 +543,24 @@ def get_tools() -> list[Tool]:
         ),
         Tool(
             name="add_mcp",
-            description="Ajoute un connecteur custom (commande + args + env)",
+            description=(
+                "Ajoute un connecteur custom (commande + args + env). "
+                "command doit etre dans la whitelist (npx, uvx, python, python3, node, uv, dotnet) — "
+                "PAS de chemin absolu d'interpreteur. env ne peut pas contenir PATH/HOME/PYTHONPATH (bloques). "
+                "MCP LOCAL (package Python livre avec un repo) : 'python -m mon_pkg' ne se resout que si Vicsia "
+                "tourne avec cwd=repo (KO en app packagee). Contournement fiable et sandbox-safe : "
+                'command="uv", args=["run", "--directory", "<chemin_repo>", "--no-sync", "python", "-m", "<pkg>"].'
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "name": {"type": "string"},
-                    "command": {"type": "string", "description": "Commande (npx, uvx, python...)"},
+                    "command": {
+                        "type": "string",
+                        "description": "Commande whitelistee (npx, uvx, python, python3, node, uv, dotnet)",
+                    },
                     "args": {"type": "array", "items": {"type": "string"}},
-                    "env": {"type": "object"},
+                    "env": {"type": "object", "description": "Variables d'env (PATH/HOME/PYTHONPATH interdits)"},
                     "description": {"type": "string"},
                 },
                 "required": ["name", "command"],
@@ -531,6 +570,280 @@ def get_tools() -> list[Tool]:
             name="delete_mcp",
             description="Supprime un connecteur custom",
             inputSchema={"type": "object", "properties": {"mcp_id": {"type": "string"}}, "required": ["mcp_id"]},
+        ),
+        # === Introspection connecteurs ===
+        Tool(
+            name="list_mcp_tools",
+            description=(
+                "Liste les tool-sets (groupes d'outils) d'un connecteur avec le detail des outils exposes "
+                "(tool_count, read_count, write_count). Utile pour verifier ce qu'un MCP fournit avant de "
+                "l'assigner a un agent, sans avoir a le declencher a la voix."
+            ),
+            inputSchema={"type": "object", "properties": {"mcp_id": {"type": "string"}}, "required": ["mcp_id"]},
+        ),
+        Tool(
+            name="test_mcp",
+            description=(
+                "Verifie qu'un connecteur est installe, actif et expose des outils. Retourne son statut "
+                "(enabled), le nombre d'outils detectes et un diagnostic. Un connecteur sans tool-sets ou "
+                "desactive est signale comme non pret."
+            ),
+            inputSchema={"type": "object", "properties": {"mcp_id": {"type": "string"}}, "required": ["mcp_id"]},
+        ),
+        Tool(
+            name="get_mcp_suggested_agents",
+            description="Propose des definitions d'agents pretes a l'emploi pour un connecteur (un agent par tool-set, avec securite adaptee).",
+            inputSchema={"type": "object", "properties": {"mcp_id": {"type": "string"}}, "required": ["mcp_id"]},
+        ),
+        Tool(
+            name="reinstall_mcp",
+            description="Force le re-telechargement d'un connecteur du catalogue au prochain usage (recalcule args/version depuis la librairie).",
+            inputSchema={"type": "object", "properties": {"mcp_id": {"type": "string"}}, "required": ["mcp_id"]},
+        ),
+        # === Projets (Chat IA / mini-app) ===
+        Tool(
+            name="list_projects",
+            description=(
+                "Liste les Projets (Chat IA / mini-app). Un Projet = prompt + connecteurs MCP + script Python. "
+                "launcher_only=true ne retourne que les projets visibles dans le lanceur (mini_app_enabled)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "launcher_only": {"type": "boolean", "description": "Filtrer sur mini_app_enabled (defaut: false)"}
+                },
+            },
+        ),
+        Tool(
+            name="create_project",
+            description="Cree un Projet (Chat IA / mini-app). Seul le nom est requis. Ensuite: upload_script, update_project pour prompt/connecteurs.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Nom du projet (max 200 chars)"},
+                    "description": {"type": "string", "description": "Description courte (max 500 chars)"},
+                },
+                "required": ["name"],
+            },
+        ),
+        Tool(
+            name="get_project",
+            description="Details d'un projet: config, presence d'un script, historique de runs, securite, metadata PEP 723, explication.",
+            inputSchema={
+                "type": "object",
+                "properties": {"project_id": {"type": "string"}},
+                "required": ["project_id"],
+            },
+        ),
+        Tool(
+            name="update_project",
+            description=(
+                "Met a jour un projet. Seuls les champs fournis sont modifies. "
+                "available_as_connector=true expose le script comme connecteur branchable sur un agent/groupe "
+                "(via update_agent script_connectors). mini_app_enabled=false le cache du lanceur."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string"},
+                    "name": {"type": "string"},
+                    "description": {"type": "string"},
+                    "prompt": {"type": "string", "description": "Instructions injectees dans le chat du projet"},
+                    "connectors": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "IDs de MCPs prioritaires",
+                    },
+                    "artifact_template": {"type": "string"},
+                    "artifact_template_id": {"type": "string"},
+                    "model": {
+                        "type": "string",
+                        "enum": ["small", "medium"],
+                        "description": "Tier LLM du projet (omettre pour heriter du global)",
+                    },
+                    "routing_keywords": {"type": "array", "items": {"type": "string"}},
+                    "available_as_connector": {
+                        "type": "boolean",
+                        "description": "Expose le script comme connecteur branchable sur un agent/groupe",
+                    },
+                    "mini_app_enabled": {"type": "boolean", "description": "Visible dans le lanceur de Projets"},
+                },
+                "required": ["project_id"],
+            },
+        ),
+        Tool(
+            name="delete_project",
+            description="Supprime (soft-delete) un projet",
+            inputSchema={
+                "type": "object",
+                "properties": {"project_id": {"type": "string"}},
+                "required": ["project_id"],
+            },
+        ),
+        # === Scripts, secrets, connecteurs-script ===
+        Tool(
+            name="upload_script",
+            description=(
+                "Televerse le code Python d'un projet (max 1 Mo). Le script passe une analyse de securite "
+                "(AST + LLM). Si bloque, le retour contient security.blocked=true — reappeler avec "
+                "acknowledge_risk=true pour forcer (le script reste sandboxe). Retourne security, metadata "
+                "(PEP 723: secrets declares, dependances), explanation et capabilities."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string"},
+                    "source": {"type": "string", "description": "Code source Python complet"},
+                    "acknowledge_risk": {
+                        "type": "boolean",
+                        "description": "Force l'upload malgre un blocage securite (defaut: false)",
+                    },
+                },
+                "required": ["project_id", "source"],
+            },
+        ),
+        Tool(
+            name="validate_script",
+            description="Valide un script Python (securite AST+LLM, metadata PEP 723, capabilities) SANS le persister. Utile avant upload_script.",
+            inputSchema={
+                "type": "object",
+                "properties": {"source": {"type": "string", "description": "Code source Python a valider"}},
+                "required": ["source"],
+            },
+        ),
+        Tool(
+            name="list_connector_scripts",
+            description=(
+                "Liste les Projets exposes comme connecteurs (available_as_connector=true), avec leur id/nom/description. "
+                "Ces ids sont a passer dans update_agent(script_connectors=[...]) ou create_group(script_connectors=[...])."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="list_project_secrets",
+            description="Liste les secrets declares (PEP 723) d'un projet: id, label, env_var, configured (bool), valeur masquee.",
+            inputSchema={
+                "type": "object",
+                "properties": {"project_id": {"type": "string"}},
+                "required": ["project_id"],
+            },
+        ),
+        Tool(
+            name="set_project_secret",
+            description=(
+                "Definit la valeur d'un secret DECLARE d'un projet (PEP 723). L'id doit exister dans les secrets "
+                "declares du script (voir list_project_secrets). JAMAIS inventer une valeur — demander a l'utilisateur."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string"},
+                    "secret_id": {"type": "string", "description": "ID du secret declare (PEP 723)"},
+                    "value": {"type": "string", "description": "Valeur du secret (max 4096 chars)"},
+                },
+                "required": ["project_id", "secret_id", "value"],
+            },
+        ),
+        Tool(
+            name="delete_project_secret",
+            description="Supprime la valeur d'un secret d'un projet.",
+            inputSchema={
+                "type": "object",
+                "properties": {"project_id": {"type": "string"}, "secret_id": {"type": "string"}},
+                "required": ["project_id", "secret_id"],
+            },
+        ),
+        # === Automations (declencheurs) ===
+        Tool(
+            name="list_automations",
+            description="Liste les automations (declencheurs qui lancent un Projet: interval/daily/webhook).",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="create_automation",
+            description=(
+                "Cree une automation qui lance un Projet selon un declencheur. "
+                "trigger: {type:'interval', every_minutes:N} | {type:'daily', at:'HH:MM'} | {type:'webhook'}. "
+                "hosted=true (Pro x3) execute cote cloud h24 machine eteinte."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Nom de l'automation (max 200 chars)"},
+                    "project_id": {"type": "string", "description": "ID du Projet a executer"},
+                    "inputs": {"type": "object", "description": "Valeurs d'entree du script {field_id: value}"},
+                    "trigger": {
+                        "type": "object",
+                        "description": "interval/daily/webhook — ex: {type:'interval', every_minutes:60}",
+                    },
+                    "enabled": {"type": "boolean", "description": "Activer immediatement (defaut: false)"},
+                    "hosted": {"type": "boolean", "description": "Execution cloud h24 (Pro x3 requis, defaut: false)"},
+                    "webhook_secret": {"type": "string", "description": "Secret HMAC pour trigger webhook (optionnel)"},
+                },
+                "required": ["name", "project_id", "inputs", "trigger"],
+            },
+        ),
+        Tool(
+            name="get_automation",
+            description="Details d'une automation par son ID.",
+            inputSchema={
+                "type": "object",
+                "properties": {"automation_id": {"type": "string"}},
+                "required": ["automation_id"],
+            },
+        ),
+        Tool(
+            name="update_automation",
+            description="Met a jour une automation (partiel). Champs: name, inputs, trigger, enabled, hosted, webhook_secret.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "automation_id": {"type": "string"},
+                    "name": {"type": "string"},
+                    "inputs": {"type": "object"},
+                    "trigger": {"type": "object"},
+                    "enabled": {"type": "boolean"},
+                    "hosted": {"type": "boolean"},
+                    "webhook_secret": {"type": "string"},
+                },
+                "required": ["automation_id"],
+            },
+        ),
+        Tool(
+            name="delete_automation",
+            description="Supprime une automation.",
+            inputSchema={
+                "type": "object",
+                "properties": {"automation_id": {"type": "string"}},
+                "required": ["automation_id"],
+            },
+        ),
+        Tool(
+            name="run_automation_now",
+            description="Declenche immediatement une automation (execution manuelle) et retourne le run.",
+            inputSchema={
+                "type": "object",
+                "properties": {"automation_id": {"type": "string"}},
+                "required": ["automation_id"],
+            },
+        ),
+        Tool(
+            name="get_automation_runs",
+            description="Historique des executions (runs) d'une automation.",
+            inputSchema={
+                "type": "object",
+                "properties": {"automation_id": {"type": "string"}},
+                "required": ["automation_id"],
+            },
+        ),
+        Tool(
+            name="get_automation_webhook_url",
+            description="Retourne l'URL webhook d'une automation de type webhook (locale ou hebergee).",
+            inputSchema={
+                "type": "object",
+                "properties": {"automation_id": {"type": "string"}},
+                "required": ["automation_id"],
+            },
         ),
         # === Settings ===
         Tool(
@@ -597,6 +910,50 @@ async def handle_tool(name: str, arguments: dict) -> list[TextContent]:
         "toggle_mcp": lambda: _api_post(f"/api/mcps/{arguments['mcp_id']}/toggle", {"enabled": arguments["enabled"]}),
         "add_mcp": lambda: _add_mcp(arguments),
         "delete_mcp": lambda: _api_delete(f"/api/mcps/{arguments['mcp_id']}"),
+        # Introspection connecteurs
+        "list_mcp_tools": lambda: _api_get(f"/api/mcps/{arguments['mcp_id']}/tool-sets"),
+        "test_mcp": lambda: _test_mcp(arguments["mcp_id"]),
+        "get_mcp_suggested_agents": lambda: _api_get(f"/api/mcps/{arguments['mcp_id']}/suggested-agents"),
+        "reinstall_mcp": lambda: _api_post(f"/api/mcps/{arguments['mcp_id']}/reinstall"),
+        # Projets
+        "list_projects": lambda: _list_projects(arguments.get("launcher_only", False)),
+        "create_project": lambda: _api_post(
+            "/api/miniapp/projects",
+            {"name": arguments["name"], "description": arguments.get("description", "")},
+        ),
+        "get_project": lambda: _api_get(f"/api/miniapp/projects/{arguments['project_id']}"),
+        "update_project": lambda: _api_patch(
+            f"/api/miniapp/projects/{arguments['project_id']}",
+            {k: v for k, v in arguments.items() if k != "project_id"},
+        ),
+        "delete_project": lambda: _api_delete(f"/api/miniapp/projects/{arguments['project_id']}"),
+        # Scripts, secrets, connecteurs-script
+        "upload_script": lambda: _api_post(
+            f"/api/miniapp/projects/{arguments['project_id']}/script",
+            {"source": arguments["source"], "acknowledge_risk": arguments.get("acknowledge_risk", False)},
+        ),
+        "validate_script": lambda: _api_post("/api/miniapp/validate-script", {"source": arguments["source"]}),
+        "list_connector_scripts": lambda: _api_get("/api/miniapp/connector-scripts"),
+        "list_project_secrets": lambda: _api_get(f"/api/miniapp/projects/{arguments['project_id']}/secrets"),
+        "set_project_secret": lambda: _api_post(
+            f"/api/miniapp/projects/{arguments['project_id']}/secrets",
+            {"id": arguments["secret_id"], "value": arguments["value"]},
+        ),
+        "delete_project_secret": lambda: _api_delete(
+            f"/api/miniapp/projects/{arguments['project_id']}/secrets/{arguments['secret_id']}"
+        ),
+        # Automations
+        "list_automations": lambda: _api_get("/api/automation/automations"),
+        "create_automation": lambda: _api_post("/api/automation/automations", _automation_create_payload(arguments)),
+        "get_automation": lambda: _api_get(f"/api/automation/automations/{arguments['automation_id']}"),
+        "update_automation": lambda: _api_patch(
+            f"/api/automation/automations/{arguments['automation_id']}",
+            {k: v for k, v in arguments.items() if k != "automation_id"},
+        ),
+        "delete_automation": lambda: _api_delete(f"/api/automation/automations/{arguments['automation_id']}"),
+        "run_automation_now": lambda: _api_post(f"/api/automation/automations/{arguments['automation_id']}/run-now"),
+        "get_automation_runs": lambda: _api_get(f"/api/automation/automations/{arguments['automation_id']}/runs"),
+        "get_automation_webhook_url": lambda: _api_get(f"/api/automation/webhook-url/{arguments['automation_id']}"),
         # Settings
         "get_settings": lambda: _api_get("/api/settings"),
         "update_settings": lambda: _api_put("/api/settings", arguments),
@@ -629,6 +986,10 @@ async def _api_put(path: str, data: dict | None = None) -> list[TextContent]:
 
 async def _api_delete(path: str) -> list[TextContent]:
     return _json_result(await _call_api("DELETE", path))
+
+
+async def _api_patch(path: str, data: dict | None = None) -> list[TextContent]:
+    return _json_result(await _call_api("PATCH", path, data))
 
 
 # ============================================================================
@@ -726,13 +1087,17 @@ async def _create_group(args: dict) -> list[TextContent]:
     group_write_mode = args.get("write_mode", "none")
     group_blocked_tools = args.get("blocked_tools", [])
     group_max_writes = args.get("max_writes", 1)
+    group_script_connectors = args.get("script_connectors", [])
 
     # 1. Creer l'orchestrateur
+    # hotkey="" : un groupe est atteint par le routeur global, pas par un raccourci dedie
+    # (ne pas consommer le pool de raccourcis — friction #5 de l'audit).
     group_data = {
         "name": args["name"],
         "description": args.get("description", ""),
         "system_prompt": "",
         "output_mode": "capsule",
+        "hotkey": "",
         "is_orchestrator": True,
         "orchestrator_mode": "router",
         "orchestrator_scope": [],
@@ -745,6 +1110,7 @@ async def _create_group(args: dict) -> list[TextContent]:
         "write_mode": group_write_mode,
         "blocked_tools": group_blocked_tools,
         "max_writes": group_max_writes,
+        "script_connectors": group_script_connectors,
     }
     group_result = await _call_api("POST", "/api/agents", group_data)
     if not group_result.get("ok"):
@@ -754,23 +1120,47 @@ async def _create_group(args: dict) -> list[TextContent]:
     created_agents = []
     reused_agents = []
     failed_agents = []
+    warnings: list[dict] = []
 
-    # 2. Index des agents existants pour eviter les doublons
+    # 2. Index des agents existants pour eviter les doublons.
+    #    On garde l'objet complet pour verifier la COMPATIBILITE avant de reutiliser
+    #    (bug #1 : un homonyme incompatible — ex. agent de selection sans voix — ne doit
+    #    PAS remplacer silencieusement un agent orchestrable de groupe).
     existing = await _call_api("GET", "/api/agents?include_archived=false")
-    name_to_id: dict[str, str] = {}
+    name_to_agent: dict[str, dict] = {}
     if isinstance(existing, list):
-        name_to_id = {a["name"].lower(): a["id"] for a in existing if a.get("name")}
+        name_to_agent = {a["name"].lower(): a for a in existing if a.get("name")}
 
     # 3. Creer les agents enfants (heritent du connecteur)
     for agent_def in args.get("agents", []):
-        # Reutiliser un agent existant avec le meme nom
-        existing_id = name_to_id.get(agent_def["name"].lower())
-        if existing_id:
-            created_agents.append(existing_id)
-            reused_agents.append(agent_def["name"])
-            continue
-
         voice = agent_def.get("voice", True)
+
+        # Reutiliser un agent existant homonyme UNIQUEMENT s'il est compatible :
+        # meme requires_voice et orchestrable (routable dans un groupe).
+        existing_agent = name_to_agent.get(agent_def["name"].lower())
+        if existing_agent:
+            compatible = (
+                existing_agent.get("requires_voice", True) == voice
+                and existing_agent.get("orchestrable", False)
+                and not existing_agent.get("is_orchestrator", False)
+            )
+            if compatible:
+                created_agents.append(existing_agent["id"])
+                reused_agents.append(agent_def["name"])
+                continue
+            # Homonyme incompatible : on cree un agent neuf et on avertit bruyamment.
+            warnings.append(
+                {
+                    "name": agent_def["name"],
+                    "warning": (
+                        f"Un agent existant nomme '{agent_def['name']}' est incompatible "
+                        f"(requires_voice={existing_agent.get('requires_voice')}, "
+                        f"orchestrable={existing_agent.get('orchestrable', False)}) — "
+                        "un nouvel agent a ete cree au lieu de le reutiliser."
+                    ),
+                }
+            )
+
         agent_data = {
             "name": agent_def["name"],
             "system_prompt": agent_def.get("system_prompt", ""),
@@ -810,9 +1200,13 @@ async def _create_group(args: dict) -> list[TextContent]:
     if reused_agents:
         response["reused"] = reused_agents
         response["message"] += f" ({len(reused_agents)} reutilises: {', '.join(reused_agents)})"
+    all_warnings = warnings + failed_agents
+    if all_warnings:
+        response["warnings"] = all_warnings
     if failed_agents:
-        response["warnings"] = failed_agents
         response["message"] += f" ({len(failed_agents)} echecs)"
+    if warnings:
+        response["message"] += f" ({len(warnings)} homonymes incompatibles recrees)"
     return _json_result(response)
 
 
@@ -841,15 +1235,46 @@ async def _delete_agent(agent_id: str) -> list[TextContent]:
 
 
 async def _add_to_group_impl(group_id: str, agent_id: str) -> dict:
-    """Helper: ajoute un agent au scope d'un groupe."""
+    """Helper: ajoute un agent au scope d'un groupe et lui fait heriter des reglages du groupe.
+
+    A l'ajout, l'agent herite des champs securite (write_mode, blocked_tools, max_writes),
+    devient orchestrable et recupere les connecteurs du groupe (union) — sinon il arrive en
+    write_mode="none" sans MCP alors que le groupe est en "ask" (bug #2 de l'audit).
+    """
     group = await _call_api("GET", f"/api/agents/{group_id}")
     if not group.get("ok"):
         return group
-    scope = group.get("agent", {}).get("orchestrator_scope", [])
-    if agent_id not in scope:
-        scope.append(agent_id)
-        return await _call_api("PUT", f"/api/agents/{group_id}", {"orchestrator_scope": scope})
-    return {"ok": True, "message": "Deja dans le groupe"}
+    group_agent = group.get("agent", {})
+    scope = group_agent.get("orchestrator_scope", [])
+    if agent_id in scope:
+        return {"ok": True, "message": "Deja dans le groupe"}
+    scope.append(agent_id)
+    result = await _call_api("PUT", f"/api/agents/{group_id}", {"orchestrator_scope": scope})
+    # Heriter des reglages du groupe (best-effort — ne pas casser l'ajout si l'heritage echoue)
+    inherit = await _inherit_group_settings(agent_id, group_agent)
+    if isinstance(result, dict) and inherit.get("inherited"):
+        result["inherited"] = inherit["inherited"]
+    return result
+
+
+async def _inherit_group_settings(agent_id: str, group_agent: dict) -> dict:
+    """Applique a l'agent les champs securite + connecteurs du groupe. Retourne les champs herites."""
+    child = await _call_api("GET", f"/api/agents/{agent_id}")
+    child_agent = child.get("agent", {}) if isinstance(child, dict) else {}
+    if not child_agent:
+        return {}
+    group_mcps = group_agent.get("mcps", []) or []
+    child_mcps = child_agent.get("mcps", []) or []
+    merged_mcps = list(dict.fromkeys([*child_mcps, *group_mcps]))
+    payload = {
+        "write_mode": group_agent.get("write_mode", "none"),
+        "max_writes": group_agent.get("max_writes", 1),
+        "blocked_tools": group_agent.get("blocked_tools", []),
+        "orchestrable": True,
+        "mcps": merged_mcps,
+    }
+    await _call_api("PUT", f"/api/agents/{agent_id}", payload)
+    return {"inherited": payload}
 
 
 async def _remove_from_group_impl(group_id: str, agent_id: str) -> dict:
@@ -961,6 +1386,76 @@ async def _add_mcp(args: dict) -> list[TextContent]:
         "description": args.get("description", ""),
     }
     return _json_result(await _call_api("POST", "/api/mcps/custom", data))
+
+
+async def _test_mcp(mcp_id: str) -> list[TextContent]:
+    """Diagnostic d'un connecteur : installe ? actif ? expose des outils ?
+
+    Il n'existe pas de handshake live cote API — on combine le statut (get_mcp) et les
+    tool-sets declares pour confirmer qu'un connecteur est pret a etre assigne a un agent.
+    """
+    mcp = await _call_api("GET", f"/api/mcps/{mcp_id}")
+    if isinstance(mcp, dict) and mcp.get("error"):
+        return _json_result(mcp)
+    mcp_obj = mcp.get("mcp", mcp) if isinstance(mcp, dict) else {}
+    enabled = bool(mcp_obj.get("enabled", False))
+
+    tool_sets_resp = await _call_api("GET", f"/api/mcps/{mcp_id}/tool-sets")
+    tool_sets = tool_sets_resp.get("tool_sets", []) if isinstance(tool_sets_resp, dict) else []
+    tool_count = sum(ts.get("tool_count", 0) for ts in tool_sets)
+
+    ready = enabled and tool_count > 0
+    if not enabled:
+        diagnosis = "Connecteur desactive — appelez toggle_mcp(enabled=true)."
+    elif tool_count == 0:
+        diagnosis = "Aucun outil detecte — verifiez la configuration (configure_mcp) ou reinstall_mcp."
+    else:
+        diagnosis = f"Pret : {len(tool_sets)} tool-set(s), {tool_count} outil(s)."
+
+    return _json_result(
+        {
+            "ok": True,
+            "mcp_id": mcp_id,
+            "enabled": enabled,
+            "tool_set_count": len(tool_sets),
+            "tool_count": tool_count,
+            "ready": ready,
+            "diagnosis": diagnosis,
+        }
+    )
+
+
+# ============================================================================
+# Projets (Chat IA / mini-app)
+# ============================================================================
+
+
+async def _list_projects(launcher_only: bool = False) -> list[TextContent]:
+    path = "/api/miniapp/projects" + ("?launcher=true" if launcher_only else "")
+    result = await _call_api("GET", path)
+    if isinstance(result, dict) and "projects" in result:
+        projects = result["projects"]
+        return _json_result({"ok": True, "projects": projects, "count": len(projects)})
+    return _json_result(result)
+
+
+# ============================================================================
+# Automations
+# ============================================================================
+
+
+def _automation_create_payload(args: dict) -> dict:
+    """Construit le corps de create_automation (champs optionnels omis si absents)."""
+    payload = {
+        "name": args["name"],
+        "project_id": args["project_id"],
+        "inputs": args.get("inputs", {}),
+        "trigger": args["trigger"],
+    }
+    for opt in ("enabled", "hosted", "webhook_secret"):
+        if opt in args:
+            payload[opt] = args[opt]
+    return payload
 
 
 # ============================================================================
@@ -1094,6 +1589,54 @@ Au premier lancement, Vicsia installe automatiquement un pack de base :
 
 Connecteurs actifs par defaut : memory, filesystem.
 Toujours verifier list_agents() avant de creer — ne pas dupliquer ces agents.
+
+
+## Projets (Chat IA / mini-app), Scripts et connecteurs-script
+
+Un Projet est un espace Chat IA : un prompt + des connecteurs MCP prioritaires + un script Python.
+- create_project (nom requis) -> update_project (prompt, connectors, model, routing_keywords)
+- upload_script pour attacher le code Python. Le script passe une analyse securite (AST + LLM).
+  Si le retour a security.blocked=true, NE PAS forcer sans l'accord explicite de l'utilisateur ;
+  reappeler upload_script(acknowledge_risk=true) seulement s'il l'accepte (le script reste sandboxe).
+- validate_script permet de tester un code AVANT de creer le projet (ne persiste rien).
+
+Secrets (PEP 723) : un script declare ses secrets dans son en-tete. list_project_secrets montre
+les secrets DECLARES (id, env_var, configured). set_project_secret(project_id, secret_id, value)
+enregistre une valeur — seuls les ids declares sont acceptes. JAMAIS inventer un secret.
+
+Brancher un script comme connecteur (mecanisme d'integration metier) :
+1. update_project(available_as_connector=true) sur le projet portant le script.
+2. list_connector_scripts pour recuperer son id.
+3. update_agent(script_connectors=[project_id]) OU create_group(script_connectors=[project_id]).
+   L'agent/groupe peut alors appeler le script comme un outil pendant l'orchestration.
+
+
+## Automations (declencheurs)
+
+Une automation lance un Projet automatiquement selon un trigger :
+- {type:"interval", every_minutes:N} (1 a 10080)  -  {type:"daily", at:"HH:MM"}  -  {type:"webhook"}
+create_automation(name, project_id, inputs, trigger). enabled=false par defaut (activer ensuite).
+run_automation_now teste immediatement. Pour un trigger webhook : get_automation_webhook_url.
+hosted=true = execution cloud h24 (machine eteinte) — reserve au plan Pro x3.
+
+
+## Verifier un connecteur avant de l'assigner
+
+Apres install_mcp/configure_mcp, valider sans passer par la voix :
+- test_mcp(mcp_id) : dit s'il est installe, actif et combien d'outils il expose (ready=true/false).
+- list_mcp_tools(mcp_id) : detail des tool-sets et des outils (read/write).
+- get_mcp_suggested_agents(mcp_id) : definitions d'agents pretes a l'emploi (securite adaptee).
+Un test_mcp avec ready=false -> toggle_mcp(enabled=true) ou reinstall_mcp puis reverifier.
+
+
+## Connecteur local (package Python custom)
+
+add_mcp n'autorise qu'une whitelist de commandes (npx, uvx, python, python3, node, uv, dotnet) —
+pas de chemin absolu d'interpreteur — et interdit PATH/HOME/PYTHONPATH dans env.
+"python -m mon_pkg" ne se resout que si Vicsia tourne avec cwd=racine du repo (KO en app packagee).
+Contournement fiable et sandbox-safe pour un package livre avec son repo :
+  command="uv", args=["run", "--directory", "<chemin_absolu_repo>", "--no-sync", "python", "-m", "<pkg>"]
+"uv run --directory" fixe le cwd sans dependre du repertoire de lancement de Vicsia.
 
 
 ## Roles
