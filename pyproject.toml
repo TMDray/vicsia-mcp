@@ -1,11 +1,11 @@
 [project]
 name = "vicsia-studio-mcp"
 version = "1.3.17-beta.3"  # remplacé automatiquement par le workflow CI
-description = "MCP server for Vicsia Studio — control your voice agents from Claude"
+description = "MCP server for Vicsia Studio — control your voice agents from any MCP-compatible AI client (Mistral, Claude, and others)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-keywords = ["mcp", "claude", "voice", "agents", "accessibility"]
+keywords = ["mcp", "mistral", "claude", "voice", "agents", "accessibility"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
